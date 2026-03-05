@@ -88,14 +88,19 @@ public class MotorCompraService
                 await PublicarKafka(compra.clienteId, ativo.Codigo, irDedoDuro);
             }
 
-            await AtualizarMaster(ativo.Id, saldoMaster, saldoConsumidoMaster, qtdParaComprarNoMercado);
+            await AtualizarMaster(ativo.Id, ativo.Codigo, saldoMaster, saldoConsumidoMaster, qtdParaComprarNoMercado);
         }
 
         await _context.SaveChangesAsync();
         return "Motor executado com sucesso.";
     }
 
-    private async Task AtualizarMaster(int ativoId, decimal saldoMasterAtual, decimal saldoConsumidoMaster, decimal qtdCompradaMercado)
+    private async Task AtualizarMaster(
+        int ativoId,
+        string codigoAtivo,
+        decimal saldoMasterAtual,
+        decimal saldoConsumidoMaster,
+        decimal qtdCompradaMercado)
     {
         var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativoId);
         if (master == null)
@@ -104,13 +109,26 @@ public class MotorCompraService
             _context.CustodiasMaster.Add(master);
         }
 
+        qtdCompradaMercado = decimal.Truncate(qtdCompradaMercado);
         master.Quantidade = saldoMasterAtual - saldoConsumidoMaster + qtdCompradaMercado;
 
-        int lotePadrao = (int)(qtdCompradaMercado / 100) * 100;
-        decimal fracionario = qtdCompradaMercado % 100;
+        int lotePadrao = ((int)qtdCompradaMercado / 100) * 100;
+        int fracionario = (int)(qtdCompradaMercado % 100);
+        var tickerFracionario = fracionario > 0 ? $"{codigoAtivo}F" : string.Empty;
+
         Console.WriteLine(
             $"Ativo {ativoId}: saldoMasterConsumido={saldoConsumidoMaster}, " +
             $"qtdCompradaMercado={qtdCompradaMercado}, lotePadrao={lotePadrao}, fracionario={fracionario}");
+
+        if (lotePadrao > 0)
+        {
+            Console.WriteLine($"Ordem lote padrão: ticker={codigoAtivo}, quantidade={lotePadrao}");
+        }
+
+        if (fracionario is >= 1 and <= 99)
+        {
+            Console.WriteLine($"Ordem fracionária: ticker={tickerFracionario}, quantidade={fracionario}");
+        }
     }
 
     private static async Task PublicarKafka(int clienteId, string codigo, decimal valorIR)
