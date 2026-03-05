@@ -31,23 +31,37 @@ public class MotorCompraService
             if (preco <= 0) continue;
 
             decimal qtdTotalAtivo = 0;
+            var comprasCliente = new List<(int clienteId, decimal quantidade, decimal valorDisponivel)>();
 
             foreach (var cliente in clientes)
             {
                 decimal valorDisponivel = (cliente.ValorMensal / 3m) * item.Percentual;
-                decimal qtdComprada = valorDisponivel / preco;
-                qtdTotalAtivo += qtdComprada;
+                decimal qtdComprada = decimal.Truncate(valorDisponivel / preco);
+                if (qtdComprada <= 0) continue;
 
+                qtdTotalAtivo += qtdComprada;
+                comprasCliente.Add((cliente.Id, qtdComprada, valorDisponivel));
+            }
+
+            if (qtdTotalAtivo <= 0) continue;
+
+            var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativo.Id);
+            var saldoMaster = master?.Quantidade ?? 0m;
+            var saldoConsumidoMaster = Math.Min(saldoMaster, qtdTotalAtivo);
+            var qtdParaComprarNoMercado = qtdTotalAtivo - saldoConsumidoMaster;
+
+            foreach (var compra in comprasCliente)
+            {
                 var custodia = await _context.CustodiasClientes
-                    .FirstOrDefaultAsync(c => c.ClienteId == cliente.Id && c.AtivoId == ativo.Id);
+                    .FirstOrDefaultAsync(c => c.ClienteId == compra.clienteId && c.AtivoId == ativo.Id);
 
                 if (custodia == null)
                 {
                     custodia = new CustodiaCliente
                     {
-                        ClienteId = cliente.Id,
+                        ClienteId = compra.clienteId,
                         AtivoId = ativo.Id,
-                        Quantidade = qtdComprada,
+                        Quantidade = compra.quantidade,
                         PrecoMedio = preco
                     };
                     _context.CustodiasClientes.Add(custodia);
@@ -55,48 +69,48 @@ public class MotorCompraService
                 else
                 {
                     custodia.PrecoMedio =
-                        ((custodia.Quantidade * custodia.PrecoMedio) + (qtdComprada * preco))
-                        / (custodia.Quantidade + qtdComprada);
-                    custodia.Quantidade += qtdComprada;
+                        ((custodia.Quantidade * custodia.PrecoMedio) + (compra.quantidade * preco))
+                        / (custodia.Quantidade + compra.quantidade);
+                    custodia.Quantidade += compra.quantidade;
                 }
 
                 _context.Movimentacoes.Add(new Movimentacao
                 {
-                    ClienteId = cliente.Id,
+                    ClienteId = compra.clienteId,
                     AtivoId = ativo.Id,
                     Tipo = "Compra",
-                    Quantidade = qtdComprada,
+                    Quantidade = compra.quantidade,
                     PrecoUnitario = preco,
                     Data = DateTime.Now
                 });
 
-                decimal irDedoDuro = valorDisponivel * 0.00005m;
-                await PublicarKafka(cliente.Id, ativo.Codigo, irDedoDuro);
+                decimal irDedoDuro = compra.valorDisponivel * 0.00005m;
+                await PublicarKafka(compra.clienteId, ativo.Codigo, irDedoDuro);
             }
 
-            await AtualizarMaster(ativo.Id, qtdTotalAtivo);
+            await AtualizarMaster(ativo.Id, saldoMaster, saldoConsumidoMaster, qtdParaComprarNoMercado);
         }
 
         await _context.SaveChangesAsync();
         return "Motor executado com sucesso.";
     }
 
-    private async Task AtualizarMaster(int ativoId, decimal qtdTotal)
+    private async Task AtualizarMaster(int ativoId, decimal saldoMasterAtual, decimal saldoConsumidoMaster, decimal qtdCompradaMercado)
     {
         var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativoId);
         if (master == null)
         {
-            master = new CustodiaMaster { AtivoId = ativoId, Quantidade = qtdTotal };
+            master = new CustodiaMaster { AtivoId = ativoId, Quantidade = 0 };
             _context.CustodiasMaster.Add(master);
         }
-        else
-        {
-            master.Quantidade += qtdTotal;
-        }
 
-        int lotePadrao = (int)(qtdTotal / 100) * 100;
-        decimal fracionario = qtdTotal % 100;
-        Console.WriteLine($"Ativo {ativoId}: Lote Padrão: {lotePadrao} | Fracionário: {fracionario}");
+        master.Quantidade = saldoMasterAtual - saldoConsumidoMaster + qtdCompradaMercado;
+
+        int lotePadrao = (int)(qtdCompradaMercado / 100) * 100;
+        decimal fracionario = qtdCompradaMercado % 100;
+        Console.WriteLine(
+            $"Ativo {ativoId}: saldoMasterConsumido={saldoConsumidoMaster}, " +
+            $"qtdCompradaMercado={qtdCompradaMercado}, lotePadrao={lotePadrao}, fracionario={fracionario}");
     }
 
     private static async Task PublicarKafka(int clienteId, string codigo, decimal valorIR)
