@@ -21,6 +21,8 @@ public class MotorCompraService
         var clientes = await _context.Clientes.Where(c => c.Ativo).ToListAsync();
 
         if (cesta == null || !clientes.Any()) return "Sem cesta ou clientes ativos.";
+        var totalAportesParcela = clientes.Sum(c => c.ValorMensal / 3m);
+        if (totalAportesParcela <= 0) return "Sem aportes válidos para execução.";
 
         foreach (var item in cesta.Itens)
         {
@@ -30,20 +32,26 @@ public class MotorCompraService
             decimal preco = _cotacaoService.ObterPrecoFechamento(ativo.Codigo);
             if (preco <= 0) continue;
 
-            decimal qtdTotalAtivo = 0;
+            var valorTotalAtivo = totalAportesParcela * item.Percentual;
+            var qtdTotalAtivo = decimal.Truncate(valorTotalAtivo / preco);
+            if (qtdTotalAtivo <= 0) continue;
+
+            decimal qtdDistribuida = 0;
             var comprasCliente = new List<(int clienteId, decimal quantidade, decimal valorDisponivel)>();
 
             foreach (var cliente in clientes)
             {
-                decimal valorDisponivel = (cliente.ValorMensal / 3m) * item.Percentual;
-                decimal qtdComprada = decimal.Truncate(valorDisponivel / preco);
-                if (qtdComprada <= 0) continue;
+                var aporteParcelaCliente = cliente.ValorMensal / 3m;
+                var proporcao = aporteParcelaCliente / totalAportesParcela;
+                var qtdCliente = decimal.Truncate(proporcao * qtdTotalAtivo);
+                if (qtdCliente <= 0) continue;
 
-                qtdTotalAtivo += qtdComprada;
-                comprasCliente.Add((cliente.Id, qtdComprada, valorDisponivel));
+                var valorDisponivel = aporteParcelaCliente * item.Percentual;
+                comprasCliente.Add((cliente.Id, qtdCliente, valorDisponivel));
+                qtdDistribuida += qtdCliente;
             }
 
-            if (qtdTotalAtivo <= 0) continue;
+            var residuoDistribuicao = qtdTotalAtivo - qtdDistribuida;
 
             var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativo.Id);
             var saldoMaster = master?.Quantidade ?? 0m;
@@ -88,7 +96,13 @@ public class MotorCompraService
                 await PublicarKafka(compra.clienteId, ativo.Codigo, irDedoDuro);
             }
 
-            await AtualizarMaster(ativo.Id, ativo.Codigo, saldoMaster, saldoConsumidoMaster, qtdParaComprarNoMercado);
+            await AtualizarMaster(
+                ativo.Id,
+                ativo.Codigo,
+                saldoMaster,
+                saldoConsumidoMaster,
+                qtdParaComprarNoMercado,
+                residuoDistribuicao);
         }
 
         await _context.SaveChangesAsync();
@@ -100,7 +114,8 @@ public class MotorCompraService
         string codigoAtivo,
         decimal saldoMasterAtual,
         decimal saldoConsumidoMaster,
-        decimal qtdCompradaMercado)
+        decimal qtdCompradaMercado,
+        decimal residuoDistribuicao)
     {
         var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativoId);
         if (master == null)
@@ -110,7 +125,8 @@ public class MotorCompraService
         }
 
         qtdCompradaMercado = decimal.Truncate(qtdCompradaMercado);
-        master.Quantidade = saldoMasterAtual - saldoConsumidoMaster + qtdCompradaMercado;
+        residuoDistribuicao = decimal.Truncate(residuoDistribuicao);
+        master.Quantidade = saldoMasterAtual - saldoConsumidoMaster + residuoDistribuicao;
 
         int lotePadrao = ((int)qtdCompradaMercado / 100) * 100;
         int fracionario = (int)(qtdCompradaMercado % 100);
@@ -118,7 +134,8 @@ public class MotorCompraService
 
         Console.WriteLine(
             $"Ativo {ativoId}: saldoMasterConsumido={saldoConsumidoMaster}, " +
-            $"qtdCompradaMercado={qtdCompradaMercado}, lotePadrao={lotePadrao}, fracionario={fracionario}");
+            $"qtdCompradaMercado={qtdCompradaMercado}, lotePadrao={lotePadrao}, " +
+            $"fracionario={fracionario}, residuo={residuoDistribuicao}, saldoMasterFinal={master.Quantidade}");
 
         if (lotePadrao > 0)
         {
