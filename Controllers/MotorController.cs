@@ -21,7 +21,7 @@ public class MotorController : ControllerBase
     }
 
     [HttpPost("executar")]
-    public async Task<IActionResult> Executar()
+    public async Task<IActionResult> Executar() 
     {
         var cesta = await _context.Cestas.Include(c => c.Itens).FirstOrDefaultAsync(c => c.Ativa);
         var clientes = await _context.Clientes.Where(c => c.Ativo).ToListAsync();
@@ -45,17 +45,25 @@ public class MotorController : ControllerBase
                 var custodia = await _context.CustodiasClientes
                     .FirstOrDefaultAsync(c => c.ClienteId == cliente.Id && c.AtivoId == ativo.Id);
 
-                if (custodia == null) {
+                if (custodia == null)
+                {
                     custodia = new CustodiaCliente { ClienteId = cliente.Id, AtivoId = ativo.Id, Quantidade = qtdComprada, PrecoMedio = preco };
                     _context.CustodiasClientes.Add(custodia);
-                } else {
+                }
+                else
+                {
                     custodia.PrecoMedio = ((custodia.Quantidade * custodia.PrecoMedio) + (qtdComprada * preco)) / (custodia.Quantidade + qtdComprada);
                     custodia.Quantidade += qtdComprada;
                 }
 
-                _context.Movimentacoes.Add(new Movimentacao {
-                    ClienteId = cliente.Id, AtivoId = ativo.Id, Tipo = "Compra",
-                    Quantidade = qtdComprada, PrecoUnitario = preco, Data = DateTime.Now
+                _context.Movimentacoes.Add(new Movimentacao
+                {
+                    ClienteId = cliente.Id,
+                    AtivoId = ativo.Id,
+                    Tipo = "Compra",
+                    Quantidade = qtdComprada,
+                    PrecoUnitario = preco,
+                    Data = DateTime.Now
                 });
 
                 decimal irDedoDuro = valorDisponivel * 0.00005m;
@@ -69,13 +77,74 @@ public class MotorController : ControllerBase
         return Ok("Motor executado com sucesso.");
     }
 
+    [HttpPost("rebalancear")]
+    public async Task<IActionResult> Rebalancear()
+    {
+        var cestaNova = await _context.Cestas.Include(c => c.Itens).FirstOrDefaultAsync(c => c.Ativa);
+        var clientes = await _context.Clientes.Where(c => c.Ativo).ToListAsync();
+
+        if (cestaNova == null) return BadRequest("Nenhuma cesta ativa para rebalancear.");
+
+        var idsAtivosNaCesta = cestaNova.Itens.Select(i => i.AtivoId).ToList();
+
+        foreach (var cliente in clientes)
+        {
+            var custodiasParaVender = await _context.CustodiasClientes
+                .Where(cu => cu.ClienteId == cliente.Id && !idsAtivosNaCesta.Contains(cu.AtivoId))
+                .ToListAsync();
+
+            decimal lucroTotalVendasMes = 0;
+            decimal volumeTotalVendasMes = 0;
+
+            foreach (var custodia in custodiasParaVender)
+            {
+                var ativo = await _context.Ativos.FindAsync(custodia.AtivoId);
+                decimal precoVenda = _cotacaoService.ObterPrecoFechamento(ativo.Codigo);
+
+                if (precoVenda <= 0) continue;
+
+                decimal valorVenda = custodia.Quantidade * precoVenda;
+                decimal custoAquisicao = custodia.Quantidade * custodia.PrecoMedio;
+                decimal lucroOperacao = valorVenda - custoAquisicao;
+
+                lucroTotalVendasMes += lucroOperacao;
+                volumeTotalVendasMes += valorVenda;
+
+                _context.Movimentacoes.Add(new Movimentacao
+                {
+                    ClienteId = cliente.Id,
+                    AtivoId = ativo.Id,
+                    Tipo = "Venda",
+                    Quantidade = custodia.Quantidade,
+                    PrecoUnitario = precoVenda,
+                    Data = DateTime.Now
+                });
+
+                _context.CustodiasClientes.Remove(custodia);
+            }
+
+            if (volumeTotalVendasMes > 20000 && lucroTotalVendasMes > 0)
+            {
+                decimal imposto20 = lucroTotalVendasMes * 0.20m;
+                await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", imposto20);
+            }
+        }
+
+        await _context.SaveChangesAsync();
+        return Ok("Rebalanceamento e apuração de IR concluídos.");
+    }
+
+
     private async Task AtualizarMaster(int ativoId, decimal qtdTotal)
     {
         var master = await _context.CustodiasMaster.FirstOrDefaultAsync(m => m.AtivoId == ativoId);
-        if (master == null) {
+        if (master == null)
+        {
             master = new CustodiaMaster { AtivoId = ativoId, Quantidade = qtdTotal };
             _context.CustodiasMaster.Add(master);
-        } else {
+        }
+        else
+        {
             master.Quantidade += qtdTotal;
         }
 
@@ -88,9 +157,13 @@ public class MotorController : ControllerBase
     {
         var config = new ProducerConfig { BootstrapServers = "localhost:9092" };
         using var producer = new ProducerBuilder<Null, string>(config).Build();
-        
-        var message = System.Text.Json.JsonSerializer.Serialize(new {
-            clienteId, ativo = codigo, valorIR, data = DateTime.Now.ToString("yyyy-MM-dd")
+
+        var message = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            clienteId,
+            ativo = codigo,
+            valorIR,
+            data = DateTime.Now.ToString("yyyy-MM-dd")
         });
 
         await producer.ProduceAsync("ir-dedo-duro", new Message<Null, string> { Value = message });
