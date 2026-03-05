@@ -19,6 +19,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString)));
 
 builder.Services.AddScoped<CotacaoService>();
+builder.Services.AddScoped<MotorCompraService>();
+builder.Services.AddHostedService<MotorAgendadorService>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
