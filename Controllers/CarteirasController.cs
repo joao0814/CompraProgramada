@@ -27,8 +27,10 @@ public class CarteirasController : ControllerBase
             .ToListAsync();
 
         var itens = new List<PosicaoCarteiraDto>();
+        // RN-063: Valor total da carteira.
         decimal valorTotalCarteira = 0m;
         decimal custoTotalCarteira = 0m;
+        // RN-065: P/L total.
         decimal plTotal = 0m;
 
         foreach (var custodia in custodias)
@@ -40,9 +42,12 @@ public class CarteirasController : ControllerBase
             if (cotacaoAtual <= 0) continue;
 
             var quantidade = custodia.Quantidade;
+            // RN-067: Preço médio.
             var precoMedio = custodia.PrecoMedio;
+            // RN-069: Cotação atual.
             var custoPosicao = quantidade * precoMedio;
             var valorPosicao = quantidade * cotacaoAtual;
+            // RN-064: P/L por ativo.
             var plAtivo = valorPosicao - custoPosicao;
 
             custoTotalCarteira += custoPosicao;
@@ -54,6 +59,7 @@ public class CarteirasController : ControllerBase
                 AtivoId = ativo.Id,
                 Codigo = ativo.Codigo,
                 Nome = ativo.Nome,
+                // RN-068: Quantidade.
                 Quantidade = quantidade,
                 PrecoMedio = precoMedio,
                 CotacaoAtual = cotacaoAtual,
@@ -62,6 +68,7 @@ public class CarteirasController : ControllerBase
             });
         }
 
+        // RN-066: Rentabilidade percentual.
         var rentabilidadePercentual =
             custoTotalCarteira > 0
                 ? (plTotal / custoTotalCarteira) * 100m
@@ -74,6 +81,7 @@ public class CarteirasController : ControllerBase
                     valorTotalCarteira > 0
                         ? (item.ValorPosicao / valorTotalCarteira) * 100m
                         : 0m;
+                // RN-070: Composição percentual da carteira.
 
                 return new
                 {

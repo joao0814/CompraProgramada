@@ -4,6 +4,7 @@ namespace CompraProgramada.Services;
 
 public class MotorAgendadorService : BackgroundService
 {
+    // RN-020: Execução programada nos dias 5, 15 e 25.
     private static readonly int[] DiasBaseExecucao = [5, 15, 25];
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<MotorAgendadorService> _logger;
@@ -51,6 +52,7 @@ public class MotorAgendadorService : BackgroundService
             var diaDoMes = Math.Min(diaBase, DateTime.DaysInMonth(hoje.Year, hoje.Month));
             var dataAjustada = new DateTime(hoje.Year, hoje.Month, diaDoMes);
 
+            // RN-021: Se cair no fim de semana, executa no próximo dia útil.
             while (dataAjustada.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
             {
                 dataAjustada = dataAjustada.AddDays(1);

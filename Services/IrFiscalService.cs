@@ -39,8 +39,12 @@ public class IrFiscalService
         }
 
         apuracao.VolumeVendas += valorVenda;
+        // RN-057: Soma de vendas mensais.
         apuracao.LucroRealizado += lucroOperacao;
+        // RN-060: Lucro acumulado considera ValorVenda - (Qtd × PM) por operação de venda.
 
+        // RN-058/RN-059/RN-061:
+        // até R$20.000 isento; acima disso 20% sobre lucro; prejuízo => IR 0.
         var impostoTotalDevido =
             (apuracao.VolumeVendas > 20000m && apuracao.LucroRealizado > 0m)
                 ? apuracao.LucroRealizado * 0.20m

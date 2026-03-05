@@ -6,6 +6,7 @@ public class CotacaoService
 
   public decimal ObterPrecoFechamento(string codigo)
   {
+    // RN-027: Fonte de cotação = arquivo COTAHIST da B3.
     var arquivo = Directory.GetFiles(_diretorioCotacoes, "COTAHIST*")
                            .OrderByDescending(f => f)
                            .FirstOrDefault();

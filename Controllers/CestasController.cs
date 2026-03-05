@@ -23,15 +23,18 @@ public class CestasController : ControllerBase
     [HttpPost] // POST /api/cesta
     public async Task<IActionResult> Post(CestaTopFive cesta)
     {
+        // RN-014: Cesta contém exatamente 5 ativos.
         if (cesta.Itens == null || cesta.Itens.Count != 5)
             return BadRequest("A cesta deve conter exatamente 5 ativos.");
 
         if (cesta.Itens.Select(i => i.AtivoId).Distinct().Count() != 5)
             return BadRequest("A cesta deve conter 5 ativos distintos.");
 
+        // RN-016: Percentuais > 0.
         if (cesta.Itens.Any(i => i.Percentual <= 0))
             return BadRequest("Todos os percentuais devem ser maiores que zero.");
 
+        // RN-015: Soma dos percentuais = 100%.
         var soma = cesta.Itens.Sum(i => i.Percentual);
         if (soma != 1.0m)
             return BadRequest($"A soma e {soma}. Deve ser exatamente 1.0 (100%).");
@@ -47,6 +50,7 @@ public class CestasController : ControllerBase
             .ToList()
             ?? new List<ItemCesta>();
 
+        // RN-017 e RN-018: Nova cesta desativa a anterior e mantém apenas uma ativa.
         if (cestaAtual != null)
             cestaAtual.Ativa = false;
 
@@ -54,6 +58,7 @@ public class CestasController : ControllerBase
         cesta.DataInicio = DateTime.UtcNow;
         _context.Cestas.Add(cesta);
 
+        // RN-045: Alteração da cesta dispara rebalanceamento.
         if (HouveAlteracaoDeCesta(itensAnteriores, cesta.Itens))
         {
             await RebalancearAposTrocaCesta(itensAnteriores, cesta.Itens);
@@ -87,7 +92,7 @@ public class CestasController : ControllerBase
     {
         var idsAnteriores = itensAnteriores.Select(i => i.AtivoId).ToHashSet();
         var idsNovos = itensNovos.Select(i => i.AtivoId).ToHashSet();
-        var idsRemovidos = idsAnteriores.Except(idsNovos).ToHashSet(); // RN-046
+        var idsRemovidos = idsAnteriores.Except(idsNovos).ToHashSet(); // RN-046: identificar ativos removidos.
         var percentuaisNovos = itensNovos.ToDictionary(i => i.AtivoId, i => i.Percentual);
 
         var clientes = await _context.Clientes.Where(c => c.Ativo).ToListAsync();
@@ -102,7 +107,7 @@ public class CestasController : ControllerBase
 
             var precoAtivoCache = new Dictionary<int, decimal>();
 
-            // RN-047: vende posicao completa dos ativos removidos
+            // RN-047: vender posição completa dos ativos removidos.
             foreach (var custodia in custodiasCliente.Where(c => idsRemovidos.Contains(c.AtivoId)).ToList())
             {
                 var precoVenda = await ObterPrecoAtivo(custodia.AtivoId, precoAtivoCache);
@@ -113,6 +118,7 @@ public class CestasController : ControllerBase
 
                 var valorVenda = qtdVenda * precoVenda;
                 var custoAquisicao = qtdVenda * custodia.PrecoMedio;
+                // RN-060: Lucro = ValorVenda - (Qtd × PM).
                 var lucroOperacao = valorVenda - custoAquisicao;
 
                 caixaDeVendasNoRebalanceamento += valorVenda;
@@ -127,6 +133,7 @@ public class CestasController : ControllerBase
                     Data = DateTime.UtcNow
                 });
 
+                // RN-057/58/59/61: apuração mensal de IR sobre vendas (até 20k isento, acima 20% sobre lucro, prejuízo = 0).
                 var impostoIncremental = await _irFiscalService.RegistrarVendaECalcularImpostoIncrementalAsync(
                     cliente.Id,
                     valorVenda,
@@ -161,7 +168,8 @@ public class CestasController : ControllerBase
             // Inclui caixa gerado nas vendas de removidos para redistribuir em novos/ajustes
             valorTotalCarteiraRebalanceavel += caixaDeVendasNoRebalanceamento;
 
-            // RN-048 e RN-049: compra novos e ajusta ativos com percentual alterado
+            // RN-048: comprar novos ativos.
+            // RN-049: ajustar ativos com percentual alterado.
             foreach (var itemNovo in itensNovos)
             {
                 var preco = await ObterPrecoAtivo(itemNovo.AtivoId, precoAtivoCache);
@@ -192,6 +200,7 @@ public class CestasController : ControllerBase
                     }
                     else
                     {
+                        // RN-041/RN-042: PM por ativo com média ponderada após compra.
                         custodia.PrecoMedio =
                             ((custodia.Quantidade * custodia.PrecoMedio) + (qtdCompra * preco))
                             / (custodia.Quantidade + qtdCompra);
@@ -218,10 +227,12 @@ public class CestasController : ControllerBase
 
                     var valorVenda = qtdVenda * preco;
                     var custoAquisicao = qtdVenda * custodia.PrecoMedio;
+                    // RN-060: Lucro = ValorVenda - (Qtd × PM).
                     var lucroOperacao = valorVenda - custoAquisicao;
 
                     caixaDeVendasNoRebalanceamento += valorVenda;
 
+                    // RN-043: Venda não altera PM; apenas reduz/remover posição.
                     custodia.Quantidade -= qtdVenda;
                     if (custodia.Quantidade <= 0)
                         _context.CustodiasClientes.Remove(custodia);

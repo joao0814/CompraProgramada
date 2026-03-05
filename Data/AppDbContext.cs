@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+        // RN-002: CPF único no sistema.
         modelBuilder.Entity<Cliente>()
             .HasIndex(c => c.Cpf)
             .IsUnique();
@@ -36,6 +37,7 @@ public class AppDbContext : DbContext
 public class Cliente
 {
     public int Id { get; set; }
+    // RN-001: Cadastro com Nome, CPF, Email e ValorMensal.
     [Required]
     public string Nome { get; set; } = string.Empty;
     [Required]
@@ -43,9 +45,12 @@ public class Cliente
     [Required]
     [EmailAddress]
     public string Email { get; set; } = string.Empty;
+    // RN-003: Validação de aporte mínimo R$100.
     [Range(100, double.MaxValue, ErrorMessage = "Valor mensal deve ser no minimo R$100.")]
     public decimal ValorMensal { get; set; }
+    // RN-005: Cliente inicia ativo.
     public bool Ativo { get; set; }
+    // RN-006: Registro da data de adesão.
     public DateTime DataAdesao { get; set; }
 }
 
