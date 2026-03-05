@@ -12,12 +12,18 @@ public class MotorController : ControllerBase
     private readonly AppDbContext _context;
     private readonly CotacaoService _cotacaoService;
     private readonly MotorCompraService _motorCompraService;
+    private readonly IrFiscalService _irFiscalService;
 
-    public MotorController(AppDbContext context, CotacaoService cotacaoService, MotorCompraService motorCompraService)
+    public MotorController(
+        AppDbContext context,
+        CotacaoService cotacaoService,
+        MotorCompraService motorCompraService,
+        IrFiscalService irFiscalService)
     {
         _context = context;
         _cotacaoService = cotacaoService;
         _motorCompraService = motorCompraService;
+        _irFiscalService = irFiscalService;
     }
 
     [HttpPost("executar")]
@@ -44,40 +50,44 @@ public class MotorController : ControllerBase
                 .Where(cu => cu.ClienteId == cliente.Id && !idsAtivosNaCesta.Contains(cu.AtivoId))
                 .ToListAsync();
 
-            decimal lucroTotalVendasMes = 0;
-            decimal volumeTotalVendasMes = 0;
-
             foreach (var custodia in custodiasParaVender)
             {
                 var ativo = await _context.Ativos.FindAsync(custodia.AtivoId);
+                if (ativo == null) continue;
+
                 decimal precoVenda = _cotacaoService.ObterPrecoFechamento(ativo.Codigo);
 
                 if (precoVenda <= 0) continue;
 
-                decimal valorVenda = custodia.Quantidade * precoVenda;
-                decimal custoAquisicao = custodia.Quantidade * custodia.PrecoMedio;
-                decimal lucroOperacao = valorVenda - custoAquisicao;
+                decimal qtdVenda = decimal.Truncate(custodia.Quantidade);
+                if (qtdVenda <= 0) continue;
 
-                lucroTotalVendasMes += lucroOperacao;
-                volumeTotalVendasMes += valorVenda;
+                decimal valorVenda = qtdVenda * precoVenda;
+                decimal custoAquisicao = qtdVenda * custodia.PrecoMedio;
+                decimal lucroOperacao = valorVenda - custoAquisicao;
 
                 _context.Movimentacoes.Add(new Movimentacao
                 {
                     ClienteId = cliente.Id,
                     AtivoId = ativo.Id,
                     Tipo = "Venda",
-                    Quantidade = custodia.Quantidade,
+                    Quantidade = qtdVenda,
                     PrecoUnitario = precoVenda,
                     Data = DateTime.Now
                 });
 
-                _context.CustodiasClientes.Remove(custodia);
-            }
+                var impostoIncremental = await _irFiscalService.RegistrarVendaECalcularImpostoIncrementalAsync(
+                    cliente.Id,
+                    valorVenda,
+                    lucroOperacao,
+                    DateTime.UtcNow);
 
-            if (volumeTotalVendasMes > 20000 && lucroTotalVendasMes > 0)
-            {
-                decimal imposto20 = lucroTotalVendasMes * 0.20m;
-                await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", imposto20);
+                if (impostoIncremental > 0)
+                {
+                    await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", impostoIncremental);
+                }
+
+                _context.CustodiasClientes.Remove(custodia);
             }
         }
 

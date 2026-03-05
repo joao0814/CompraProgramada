@@ -92,7 +92,8 @@ public class MotorCompraService
                     Data = DateTime.Now
                 });
 
-                decimal irDedoDuro = compra.valorDisponivel * 0.00005m;
+                decimal valorOperacao = compra.quantidade * preco;
+                decimal irDedoDuro = valorOperacao * 0.00005m;
                 await PublicarKafka(compra.clienteId, ativo.Codigo, irDedoDuro);
             }
 

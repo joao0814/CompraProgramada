@@ -15,6 +15,7 @@ public class AppDbContext : DbContext
     public DbSet<CustodiaMaster> CustodiasMaster { get; set; }
     public DbSet<Movimentacao> Movimentacoes { get; set; }
     public DbSet<ContaGraficaFilhote> ContasGraficasFilhote { get; set; }
+    public DbSet<ApuracaoIrMensal> ApuracoesIrMensais { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -24,6 +25,9 @@ public class AppDbContext : DbContext
             .IsUnique();
         modelBuilder.Entity<ContaGraficaFilhote>()
             .HasIndex(c => c.ClienteId)
+            .IsUnique();
+        modelBuilder.Entity<ApuracaoIrMensal>()
+            .HasIndex(a => new { a.ClienteId, a.Ano, a.Mes })
             .IsUnique();
     }
 
@@ -89,6 +93,17 @@ public class ContaGraficaFilhote
     public int ClienteId { get; set; }
     public DateTime DataCriacao { get; set; }
     public bool Ativa { get; set; }
+}
+
+public class ApuracaoIrMensal
+{
+    public int Id { get; set; }
+    public int ClienteId { get; set; }
+    public int Ano { get; set; }
+    public int Mes { get; set; }
+    public decimal VolumeVendas { get; set; }
+    public decimal LucroRealizado { get; set; }
+    public decimal ImpostoCalculado { get; set; }
 }
 
 public class Movimentacao

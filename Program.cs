@@ -20,6 +20,7 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<CotacaoService>();
 builder.Services.AddScoped<MotorCompraService>();
+builder.Services.AddScoped<IrFiscalService>();
 builder.Services.AddHostedService<MotorAgendadorService>();
 
 builder.Services.AddEndpointsApiExplorer();

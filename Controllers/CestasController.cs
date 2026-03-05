@@ -11,11 +11,13 @@ public class CestasController : ControllerBase
 {
     private readonly AppDbContext _context;
     private readonly CotacaoService _cotacaoService;
+    private readonly IrFiscalService _irFiscalService;
 
-    public CestasController(AppDbContext context, CotacaoService cotacaoService)
+    public CestasController(AppDbContext context, CotacaoService cotacaoService, IrFiscalService irFiscalService)
     {
         _context = context;
         _cotacaoService = cotacaoService;
+        _irFiscalService = irFiscalService;
     }
 
     [HttpPost] // POST /api/cesta
@@ -36,16 +38,26 @@ public class CestasController : ControllerBase
 
         await using var tx = await _context.Database.BeginTransactionAsync();
 
-        var cestasAtivas = await _context.Cestas.Where(c => c.Ativa).ToListAsync();
-        foreach (var atual in cestasAtivas)
-            atual.Ativa = false;
+        var cestaAtual = await _context.Cestas
+            .Include(c => c.Itens)
+            .FirstOrDefaultAsync(c => c.Ativa);
+
+        var itensAnteriores = cestaAtual?.Itens
+            .Select(i => new ItemCesta { AtivoId = i.AtivoId, Percentual = i.Percentual })
+            .ToList()
+            ?? new List<ItemCesta>();
+
+        if (cestaAtual != null)
+            cestaAtual.Ativa = false;
 
         cesta.Ativa = true;
         cesta.DataInicio = DateTime.UtcNow;
         _context.Cestas.Add(cesta);
 
-        var idsAtivosNaCesta = cesta.Itens.Select(i => i.AtivoId).ToList();
-        await RebalancearAposTrocaCesta(idsAtivosNaCesta);
+        if (HouveAlteracaoDeCesta(itensAnteriores, cesta.Itens))
+        {
+            await RebalancearAposTrocaCesta(itensAnteriores, cesta.Itens);
+        }
 
         await _context.SaveChangesAsync();
 
@@ -71,53 +83,200 @@ public class CestasController : ControllerBase
         return Ok(cesta);
     }
 
-    private async Task RebalancearAposTrocaCesta(List<int> idsAtivosNaCesta)
+    private async Task RebalancearAposTrocaCesta(List<ItemCesta> itensAnteriores, List<ItemCesta> itensNovos)
     {
+        var idsAnteriores = itensAnteriores.Select(i => i.AtivoId).ToHashSet();
+        var idsNovos = itensNovos.Select(i => i.AtivoId).ToHashSet();
+        var idsRemovidos = idsAnteriores.Except(idsNovos).ToHashSet(); // RN-046
+        var percentuaisNovos = itensNovos.ToDictionary(i => i.AtivoId, i => i.Percentual);
+
         var clientes = await _context.Clientes.Where(c => c.Ativo).ToListAsync();
 
         foreach (var cliente in clientes)
         {
-            var custodiasParaVender = await _context.CustodiasClientes
-                .Where(cu => cu.ClienteId == cliente.Id && !idsAtivosNaCesta.Contains(cu.AtivoId))
+            decimal caixaDeVendasNoRebalanceamento = 0m;
+
+            var custodiasCliente = await _context.CustodiasClientes
+                .Where(cu => cu.ClienteId == cliente.Id && cu.Quantidade > 0)
                 .ToListAsync();
 
-            decimal lucroTotalVendasMes = 0;
-            decimal volumeTotalVendasMes = 0;
+            var precoAtivoCache = new Dictionary<int, decimal>();
 
-            foreach (var custodia in custodiasParaVender)
+            // RN-047: vende posicao completa dos ativos removidos
+            foreach (var custodia in custodiasCliente.Where(c => idsRemovidos.Contains(c.AtivoId)).ToList())
             {
-                var ativo = await _context.Ativos.FindAsync(custodia.AtivoId);
-                if (ativo == null) continue;
-
-                decimal precoVenda = _cotacaoService.ObterPrecoFechamento(ativo.Codigo);
+                var precoVenda = await ObterPrecoAtivo(custodia.AtivoId, precoAtivoCache);
                 if (precoVenda <= 0) continue;
 
-                decimal valorVenda = custodia.Quantidade * precoVenda;
-                decimal custoAquisicao = custodia.Quantidade * custodia.PrecoMedio;
-                decimal lucroOperacao = valorVenda - custoAquisicao;
+                var qtdVenda = decimal.Truncate(custodia.Quantidade);
+                if (qtdVenda <= 0) continue;
 
-                lucroTotalVendasMes += lucroOperacao;
-                volumeTotalVendasMes += valorVenda;
+                var valorVenda = qtdVenda * precoVenda;
+                var custoAquisicao = qtdVenda * custodia.PrecoMedio;
+                var lucroOperacao = valorVenda - custoAquisicao;
+
+                caixaDeVendasNoRebalanceamento += valorVenda;
 
                 _context.Movimentacoes.Add(new Movimentacao
                 {
                     ClienteId = cliente.Id,
-                    AtivoId = ativo.Id,
+                    AtivoId = custodia.AtivoId,
                     Tipo = "Venda",
-                    Quantidade = custodia.Quantidade,
+                    Quantidade = qtdVenda,
                     PrecoUnitario = precoVenda,
                     Data = DateTime.UtcNow
                 });
 
-                _context.CustodiasClientes.Remove(custodia);
+                var impostoIncremental = await _irFiscalService.RegistrarVendaECalcularImpostoIncrementalAsync(
+                    cliente.Id,
+                    valorVenda,
+                    lucroOperacao,
+                    DateTime.UtcNow);
+
+                if (impostoIncremental > 0)
+                {
+                    await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", impostoIncremental);
+                }
+
+                custodia.Quantidade -= qtdVenda;
+                if (custodia.Quantidade <= 0)
+                    _context.CustodiasClientes.Remove(custodia);
             }
 
-            if (volumeTotalVendasMes > 20000 && lucroTotalVendasMes > 0)
+            var custodiasNovosAtivos = await _context.CustodiasClientes
+                .Where(cu => cu.ClienteId == cliente.Id && idsNovos.Contains(cu.AtivoId))
+                .ToListAsync();
+
+            decimal valorTotalCarteiraRebalanceavel = 0m;
+            foreach (var itemNovo in itensNovos)
             {
-                decimal imposto20 = lucroTotalVendasMes * 0.20m;
-                await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", imposto20);
+                var preco = await ObterPrecoAtivo(itemNovo.AtivoId, precoAtivoCache);
+                if (preco <= 0) continue;
+
+                var qtdAtual = custodiasNovosAtivos
+                    .FirstOrDefault(c => c.AtivoId == itemNovo.AtivoId)?.Quantidade ?? 0m;
+                valorTotalCarteiraRebalanceavel += qtdAtual * preco;
+            }
+
+            // Inclui caixa gerado nas vendas de removidos para redistribuir em novos/ajustes
+            valorTotalCarteiraRebalanceavel += caixaDeVendasNoRebalanceamento;
+
+            // RN-048 e RN-049: compra novos e ajusta ativos com percentual alterado
+            foreach (var itemNovo in itensNovos)
+            {
+                var preco = await ObterPrecoAtivo(itemNovo.AtivoId, precoAtivoCache);
+                if (preco <= 0) continue;
+
+                var alvoValor = valorTotalCarteiraRebalanceavel * percentuaisNovos[itemNovo.AtivoId];
+                var custodia = custodiasNovosAtivos.FirstOrDefault(c => c.AtivoId == itemNovo.AtivoId);
+                var qtdAtual = custodia?.Quantidade ?? 0m;
+                var valorAtual = qtdAtual * preco;
+                var diferencaValor = alvoValor - valorAtual;
+
+                if (diferencaValor > 0)
+                {
+                    var qtdCompra = decimal.Truncate(diferencaValor / preco);
+                    if (qtdCompra <= 0) continue;
+
+                    if (custodia == null)
+                    {
+                        custodia = new CustodiaCliente
+                        {
+                            ClienteId = cliente.Id,
+                            AtivoId = itemNovo.AtivoId,
+                            Quantidade = qtdCompra,
+                            PrecoMedio = preco
+                        };
+                        _context.CustodiasClientes.Add(custodia);
+                        custodiasNovosAtivos.Add(custodia);
+                    }
+                    else
+                    {
+                        custodia.PrecoMedio =
+                            ((custodia.Quantidade * custodia.PrecoMedio) + (qtdCompra * preco))
+                            / (custodia.Quantidade + qtdCompra);
+                        custodia.Quantidade += qtdCompra;
+                    }
+
+                    _context.Movimentacoes.Add(new Movimentacao
+                    {
+                        ClienteId = cliente.Id,
+                        AtivoId = itemNovo.AtivoId,
+                        Tipo = "Compra",
+                        Quantidade = qtdCompra,
+                        PrecoUnitario = preco,
+                        Data = DateTime.UtcNow
+                    });
+                }
+                else if (diferencaValor < 0)
+                {
+                    if (custodia == null || custodia.Quantidade <= 0) continue;
+
+                    var qtdVenda = decimal.Truncate((-diferencaValor) / preco);
+                    qtdVenda = Math.Min(qtdVenda, decimal.Truncate(custodia.Quantidade));
+                    if (qtdVenda <= 0) continue;
+
+                    var valorVenda = qtdVenda * preco;
+                    var custoAquisicao = qtdVenda * custodia.PrecoMedio;
+                    var lucroOperacao = valorVenda - custoAquisicao;
+
+                    caixaDeVendasNoRebalanceamento += valorVenda;
+
+                    custodia.Quantidade -= qtdVenda;
+                    if (custodia.Quantidade <= 0)
+                        _context.CustodiasClientes.Remove(custodia);
+
+                    _context.Movimentacoes.Add(new Movimentacao
+                    {
+                        ClienteId = cliente.Id,
+                        AtivoId = itemNovo.AtivoId,
+                        Tipo = "Venda",
+                        Quantidade = qtdVenda,
+                        PrecoUnitario = preco,
+                        Data = DateTime.UtcNow
+                    });
+
+                    var impostoIncremental = await _irFiscalService.RegistrarVendaECalcularImpostoIncrementalAsync(
+                        cliente.Id,
+                        valorVenda,
+                        lucroOperacao,
+                        DateTime.UtcNow);
+
+                    if (impostoIncremental > 0)
+                    {
+                        await PublicarKafka(cliente.Id, "DARF_IR_20_LUCRO", impostoIncremental);
+                    }
+                }
             }
         }
+    }
+
+    private async Task<decimal> ObterPrecoAtivo(int ativoId, Dictionary<int, decimal> cache)
+    {
+        if (cache.TryGetValue(ativoId, out var precoCache)) return precoCache;
+
+        var ativo = await _context.Ativos.FindAsync(ativoId);
+        if (ativo == null) return 0m;
+
+        var preco = _cotacaoService.ObterPrecoFechamento(ativo.Codigo);
+        cache[ativoId] = preco;
+        return preco;
+    }
+
+    private static bool HouveAlteracaoDeCesta(List<ItemCesta> itensAnteriores, List<ItemCesta> itensNovos)
+    {
+        if (itensAnteriores.Count != itensNovos.Count) return true;
+
+        var anterior = itensAnteriores.OrderBy(i => i.AtivoId).ToList();
+        var nova = itensNovos.OrderBy(i => i.AtivoId).ToList();
+
+        for (var i = 0; i < anterior.Count; i++)
+        {
+            if (anterior[i].AtivoId != nova[i].AtivoId) return true;
+            if (anterior[i].Percentual != nova[i].Percentual) return true;
+        }
+
+        return false;
     }
 
     private static async Task PublicarKafka(int clienteId, string codigo, decimal valorIR)
